@@ -1,0 +1,1774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Echoes of the Lost Temple</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;900&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: radial-gradient(circle at center, #111827 0%, #080c14 65%, #030408 100%);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
+.game-frame {
+  position: relative;
+  padding: 6px;
+  background: linear-gradient(135deg, #92400e 0%, #362009 30%, #78350f 70%, #d97706 100%);
+  border-radius: 10px;
+  box-shadow: 0 0 45px rgba(217, 119, 6, 0.22), 0 25px 50px rgba(0, 0, 0, 0.85);
+}
+canvas {
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  border-radius: 6px;
+  box-shadow: inset 0 0 25px rgba(0, 0, 0, 0.95);
+}
+</style>
+</head>
+<body>
+<div class="game-frame">
+  <canvas id="game"></canvas>
+</div>
+<script>
+// ============================================================================
+//  Echoes of the Lost Temple — Definitive Royal Temple Edition
+//  A 2D top-down puzzle adventure
+// ============================================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// --- Constants ---
+const TILE = 48;
+const COLS = 20;
+const ROWS = 14;
+canvas.width = COLS * TILE;
+canvas.height = ROWS * TILE;
+
+// --- Asset Loading ---
+const ASSETS = {};
+let assetsLoaded = 0;
+const ASSET_LIST = ['arin_idle', 'tile_stone_floor', 'tile_stone_wall'];
+const TOTAL_ASSETS = ASSET_LIST.length;
+
+function loadAssets(cb) {
+  if (ASSET_LIST.length === 0) { cb(); return; }
+  ASSET_LIST.forEach(name => {
+    const img = new Image();
+    img.onload = () => { assetsLoaded++; if (assetsLoaded >= TOTAL_ASSETS) cb(); };
+    img.onerror = () => { assetsLoaded++; if (assetsLoaded >= TOTAL_ASSETS) cb(); };
+    img.src = `assets/${name}.png`;
+    ASSETS[name] = img;
+  });
+}
+
+// --- Audio (procedural) ---
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+let muted = false;
+
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new AudioCtx();
+}
+
+function playTone(freq, dur, type = 'square', vol = 0.08) {
+  if (muted) return;
+  ensureAudio();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + dur);
+}
+
+function sfxStep() { playTone(180 + Math.random() * 60, 0.05, 'triangle', 0.025); }
+function sfxPush() { playTone(110, 0.16, 'sawtooth', 0.07); }
+function sfxSwitch() { playTone(540, 0.12, 'square', 0.08); playTone(720, 0.14, 'square', 0.07); }
+function sfxDoor() { playTone(280, 0.28, 'triangle', 0.09); }
+function sfxBarrier() {
+  playTone(150, 0.08, 'sawtooth', 0.08);
+  setTimeout(() => playTone(110, 0.12, 'sine', 0.06), 40);
+}
+function sfxJump() {
+  playTone(260, 0.08, 'sine', 0.09);
+  setTimeout(() => playTone(380, 0.1, 'sine', 0.08), 35);
+}
+function sfxLand() {
+  playTone(130, 0.07, 'triangle', 0.06);
+}
+function sfxCrystal() {
+  playTone(523, 0.1, 'sine', 0.1);
+  setTimeout(() => playTone(659, 0.1, 'sine', 0.1), 80);
+  setTimeout(() => playTone(784, 0.15, 'sine', 0.12), 160);
+  setTimeout(() => playTone(1046, 0.2, 'sine', 0.14), 240);
+}
+function sfxTeleport() {
+  for (let i = 0; i < 9; i++) {
+    setTimeout(() => playTone(280 + i * 90, 0.06, 'sine', 0.06), i * 28);
+  }
+}
+function sfxVictory() {
+  const notes = [523, 659, 784, 1047, 784, 1047, 1319, 1568];
+  notes.forEach((n, i) => setTimeout(() => playTone(n, 0.22, 'sine', 0.12), i * 110));
+}
+
+// --- Input ---
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase()) || e.key === ' ') {
+    e.preventDefault();
+  }
+});
+document.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+canvas.addEventListener('click', () => ensureAudio());
+
+// --- Game State ---
+let gameState = 'menu'; // menu, playing, paused, victory, instructions
+let crystalCount = 0;
+let totalCrystals = 0;
+let currentRoomIndex = 0;
+let notification = null;
+let notificationTimer = 0;
+let roomTransition = 0;
+let roomTransDir = 0; // 1 = fade out, -1 = fade in
+let nextRoomIndex = -1;
+let stepTimer = 0;
+let particles = [];
+let victoryTimer = 0;
+let switchHintCooldown = 0;
+let bumpWarningCooldown = 0;
+
+// Ambient floating golden temple dust motes
+const ambientMotes = [];
+for (let i = 0; i < 35; i++) {
+  ambientMotes.push({
+    x: Math.random() * canvas.width,
+    y: Math.random() * canvas.height,
+    vx: (Math.random() - 0.5) * 12,
+    vy: -Math.random() * 14 - 4,
+    size: Math.random() * 2 + 1,
+    alpha: Math.random() * 0.45 + 0.15,
+    color: Math.random() > 0.4 ? '#FDE047' : '#38BDF8'
+  });
+}
+
+// --- Player ---
+const player = {
+  x: 0, y: 0, vx: 0, vy: 0,
+  z: 0, vz: 0, isJumping: false, jumpCooldown: 0,
+  w: TILE * 0.7, h: TILE * 0.7,
+  speed: 4.5, accel: 0.45, decel: 0.55,
+  facingX: 0, facingY: 1,
+  flipX: false,
+  interactCooldown: 0,
+  teleportCooldown: 0,
+};
+
+function showNotification(text, dur = 2.5) {
+  notification = text;
+  notificationTimer = dur;
+}
+
+// --- Tile types ---
+const T = {
+  EMPTY: 0,
+  WALL: 1,
+  FLOOR: 2,
+  DOOR_CLOSED: 3,
+  DOOR_OPEN: 4,
+  PRESSURE_PLATE: 5,
+  SWITCH_OFF: 6,
+  SWITCH_ON: 7,
+  CRYSTAL: 8,
+  PORTAL_A: 9,
+  PORTAL_B: 10,
+  SPAWN: 11,
+  EXIT: 12,
+  CRYSTAL_DOOR: 13,
+};
+
+// --- Room Definitions ---
+// Each room: { name, map (2D array), blocks [{x,y}], doors [{x,y,requires}], crystalReq, spawnX, spawnY }
+
+function createRooms() {
+  const rooms = [];
+
+  // ---- Room 1: The Forgotten Entrance ----
+  rooms.push({
+    name: 'The Forgotten Entrance',
+    crystalsNeeded: 0,
+    map: generateMap1(),
+    blocks: [{x:7,y:6},{x:8,y:8}],
+    switches: [],
+    portals: [],
+    crystals: [{x:15,y:3},{x:4,y:10}],
+    doors: [{x:18,y:7,type:'plate',plateX:10,plateY:7}],
+    restrictedBadges: [{x: 12, y: 3.5}, {x: 12, y: 10.5}],
+    exit: {x:19,y:7},
+    spawnX: 2, spawnY: 7,
+  });
+
+  // ---- Room 2: Chamber of Weight ----
+  rooms.push({
+    name: 'Chamber of Weight',
+    crystalsNeeded: 0,
+    map: generateMap2(),
+    blocks: [{x:5,y:4},{x:8,y:9},{x:14,y:5}],
+    switches: [],
+    portals: [],
+    crystals: [{x:17,y:2},{x:3,y:11}],
+    doors: [
+      {x:10,y:6,type:'plate',plateX:7,plateY:6},
+      {x:16,y:4,type:'plate',plateX:13,plateY:4},
+    ],
+    restrictedBadges: [{x: 6, y: 2}, {x: 11, y: 8.5}],
+    exit: {x:19,y:7},
+    spawnX: 1, spawnY: 7,
+  });
+
+  // ---- Room 3: Hall of Switches ----
+  rooms.push({
+    name: 'Hall of Switches',
+    crystalsNeeded: 0,
+    map: generateMap3(),
+    blocks: [{x:6,y:7}],
+    switches: [{x:4,y:3,doorIdx:0},{x:15,y:10,doorIdx:1}],
+    portals: [],
+    crystals: [{x:10,y:2},{x:17,y:11}],
+    doors: [
+      {x:9,y:5,type:'switch'},
+      {x:16,y:8,type:'switch'},
+    ],
+    restrictedBadges: [{x: 5.5, y: 4}, {x: 14.5, y: 6}],
+    exit: {x:19,y:7},
+    spawnX: 1, spawnY: 7,
+  });
+
+  // ---- Room 4: Portal Sanctuary ----
+  rooms.push({
+    name: 'Portal Sanctuary',
+    crystalsNeeded: 0,
+    map: generateMap4(),
+    blocks: [{x:5,y:5}],
+    switches: [{x:15,y:3,doorIdx:0}],
+    portals: [{ax:3,ay:9,bx:16,by:3},{ax:8,ay:2,bx:12,by:11}],
+    crystals: [{x:17,y:10},{x:2,y:3}],
+    doors: [{x:14,y:7,type:'switch'}],
+    restrictedBadges: [{x: 10, y: 3.5}, {x: 10, y: 10.5}],
+    exit: {x:19,y:7},
+    spawnX: 1, spawnY: 7,
+  });
+
+  // ---- Room 5: The Mirror Chambers ----
+  rooms.push({
+    name: 'The Mirror Chambers',
+    crystalsNeeded: 4,
+    map: generateMap5(),
+    blocks: [{x:6,y:5},{x:14,y:9}],
+    switches: [{x:5,y:10,doorIdx:0},{x:15,y:3,doorIdx:1}],
+    portals: [{ax:2,ay:2,bx:17,by:11}],
+    crystals: [{x:10,y:2},{x:10,y:11}],
+    doors: [{x:8,y:7,type:'switch'},{x:18,y:7,type:'switch'}],
+    restrictedBadges: [{x: 5, y: 3.5}, {x: 15, y: 10.5}],
+    exit: {x:19,y:7},
+    spawnX: 1, spawnY: 7,
+  });
+
+  // ---- Room 6: The Sunken Vault ----
+  rooms.push({
+    name: 'The Sunken Vault',
+    crystalsNeeded: 6,
+    map: generateMap6(),
+    blocks: [{x:4,y:6},{x:14,y:7}],
+    switches: [{x:16,y:2,doorIdx:1}],
+    portals: [{ax:2,ay:11,bx:17,by:2}],
+    crystals: [{x:7,y:2},{x:12,y:11}],
+    doors: [
+      {x:10,y:6,type:'plate',plateX:7,plateY:6},
+      {x:18,y:7,type:'switch'}
+    ],
+    restrictedBadges: [{x: 10, y: 5.5}, {x: 10, y: 8.5}],
+    exit: {x:19,y:7},
+    spawnX: 1, spawnY: 7,
+  });
+
+  // ---- Room 7: Heart of the Temple ----
+  rooms.push({
+    name: 'Heart of the Temple',
+    crystalsNeeded: 8,
+    map: generateMap7(),
+    blocks: [{x:6,y:3},{x:13,y:10}],
+    switches: [{x:2,y:3,doorIdx:0},{x:17,y:10,doorIdx:1}],
+    portals: [{ax:2,ay:10,bx:17,by:3}],
+    crystals: [{x:10,y:2},{x:10,y:12}],
+    doors: [
+      {x:8,y:7,type:'switch'},
+      {x:12,y:7,type:'switch'}
+    ],
+    restrictedBadges: [{x: 4, y: 4.5}, {x: 15, y: 9.5}],
+    exit: {x:10,y:7}, // Sacred central altar!
+    spawnX: 1, spawnY: 7,
+  });
+
+  return rooms;
+}
+
+function makeEmptyMap() {
+  const m = [];
+  for (let y = 0; y < ROWS; y++) {
+    m[y] = [];
+    for (let x = 0; x < COLS; x++) {
+      if (y === 0 || y === ROWS-1 || x === 0 || x === COLS-1) m[y][x] = T.WALL;
+      else m[y][x] = T.FLOOR;
+    }
+  }
+  return m;
+}
+
+function addWalls(m, walls) {
+  walls.forEach(([x,y]) => { if (m[y] && m[y][x] !== undefined) m[y][x] = T.WALL; });
+}
+
+function generateMap1() {
+  const m = makeEmptyMap();
+  // Some internal walls to make a corridor
+  for (let y = 2; y <= 5; y++) m[y][12] = T.WALL;
+  for (let y = 9; y <= 11; y++) m[y][12] = T.WALL;
+  for (let x = 5; x <= 9; x++) m[5][x] = T.WALL;
+  m[5][7] = T.FLOOR; // gap
+  for (let x = 5; x <= 9; x++) m[9][x] = T.WALL;
+  m[9][8] = T.FLOOR; // gap
+  return m;
+}
+
+function generateMap2() {
+  const m = makeEmptyMap();
+  // Vertical walls with gaps
+  for (let y = 1; y <= 5; y++) m[y][6] = T.WALL;
+  m[3][6] = T.FLOOR;
+  for (let y = 8; y <= 12; y++) m[y][6] = T.WALL;
+  m[10][6] = T.FLOOR;
+  for (let y = 1; y <= 3; y++) m[y][11] = T.WALL;
+  for (let y = 5; y <= 12; y++) m[y][11] = T.WALL;
+  for (let y = 1; y <= 8; y++) m[y][16] = T.WALL;
+  m[4][16] = T.FLOOR;
+  for (let y = 10; y <= 12; y++) m[y][16] = T.WALL;
+  return m;
+}
+
+function generateMap3() {
+  const m = makeEmptyMap();
+  // Maze-like sections
+  for (let x = 3; x <= 8; x++) m[4][x] = T.WALL;
+  m[4][6] = T.FLOOR;
+  for (let x = 3; x <= 8; x++) m[9][x] = T.WALL;
+  m[9][5] = T.FLOOR;
+  for (let y = 4; y <= 9; y++) m[y][3] = T.WALL;
+  m[7][3] = T.FLOOR;
+  for (let x = 12; x <= 17; x++) m[6][x] = T.WALL;
+  m[6][14] = T.FLOOR;
+  for (let x = 12; x <= 17; x++) m[9][x] = T.WALL;
+  m[9][15] = T.FLOOR;
+  return m;
+}
+
+function generateMap4() {
+  const m = makeEmptyMap();
+  // Sections separated by walls, connected by portals
+  for (let y = 1; y <= 12; y++) m[y][10] = T.WALL;
+  m[7][10] = T.FLOOR; // the door goes here
+  for (let x = 1; x <= 6; x++) m[6][x] = T.WALL;
+  m[6][4] = T.FLOOR;
+  for (let x = 13; x <= 18; x++) m[6][x] = T.WALL;
+  m[6][16] = T.FLOOR;
+  return m;
+}
+
+function generateMap5() {
+  const m = makeEmptyMap();
+  // Symmetrical temple layout
+  for (let y = 1; y <= 12; y++) m[y][5] = T.WALL;
+  m[5][5] = T.FLOOR; m[9][5] = T.FLOOR;
+  for (let y = 1; y <= 12; y++) m[y][15] = T.WALL;
+  m[5][15] = T.FLOOR; m[7][15] = T.FLOOR; m[9][15] = T.FLOOR;
+  for (let x = 7; x <= 13; x++) m[4][x] = T.WALL;
+  m[4][10] = T.FLOOR;
+  for (let x = 7; x <= 13; x++) m[10][x] = T.WALL;
+  m[10][10] = T.FLOOR;
+  // Central chamber
+  m[6][8] = T.WALL; m[6][12] = T.WALL;
+  m[8][8] = T.WALL; m[8][12] = T.WALL;
+  return m;
+}
+
+function generateMap6() {
+  const m = makeEmptyMap();
+  // Upper and lower channels with central stone bridge
+  for (let x = 2; x <= 17; x++) {
+    m[4][x] = T.WALL;
+    m[9][x] = T.WALL;
+  }
+  m[4][5] = T.FLOOR;
+  m[4][14] = T.FLOOR;
+  m[9][6] = T.FLOOR;
+  m[9][13] = T.FLOOR;
+
+  // Vertical dividers
+  for (let y = 5; y <= 8; y++) {
+    m[y][10] = T.WALL;
+  }
+  m[6][10] = T.FLOOR; // bridge opening
+  m[7][10] = T.FLOOR;
+  return m;
+}
+
+function generateMap7() {
+  const m = makeEmptyMap();
+  // Grand inner sanctum with outer colonnade and central sacred altar
+  for (let y = 2; y <= 11; y++) {
+    m[y][4] = T.WALL;
+    m[y][15] = T.WALL;
+  }
+  m[6][4] = T.FLOOR; m[7][4] = T.FLOOR;
+  m[6][15] = T.FLOOR; m[7][15] = T.FLOOR;
+
+  // Central shrine chamber enclosing sacred altar at (10, 7)
+  for (let x = 8; x <= 12; x++) {
+    m[5][x] = T.WALL;
+    m[9][x] = T.WALL;
+  }
+  m[6][8] = T.WALL; m[7][8] = T.WALL; m[8][8] = T.WALL;
+  m[6][12] = T.WALL; m[7][12] = T.WALL; m[8][12] = T.WALL;
+  
+  // Door passages into shrine
+  m[7][8] = T.FLOOR;
+  m[7][12] = T.FLOOR;
+  return m;
+}
+
+// --- Runtime room state ---
+let rooms = [];
+let room = null;
+let roomBlocks = [];
+let roomDoors = [];
+let roomSwitches = [];
+let roomPortals = [];
+let roomCrystals = [];
+let collectedCrystals = new Set(); // global: "roomIdx_crystalIdx"
+
+function loadRoom(idx) {
+  currentRoomIndex = idx;
+  room = rooms[idx];
+
+  // Punch holes in the wall for exit and spawn so the player can reach them
+  if (room.exit) room.map[room.exit.y][room.exit.x] = T.FLOOR;
+  room.map[room.spawnY][room.spawnX] = T.FLOOR;
+
+  // Also open the tile just inside the exit so there's a walkable path
+  if (room.exit) {
+    const ex = room.exit.x, ey = room.exit.y;
+    if (ex === COLS - 1 && room.map[ey][ex - 1] === T.WALL) room.map[ey][ex - 1] = T.FLOOR;
+    if (ex === 0 && room.map[ey][ex + 1] === T.WALL) room.map[ey][ex + 1] = T.FLOOR;
+    if (ey === ROWS - 1 && room.map[ey - 1][ex] === T.WALL) room.map[ey - 1][ex] = T.FLOOR;
+    if (ey === 0 && room.map[ey + 1][ex] === T.WALL) room.map[ey + 1][ex] = T.FLOOR;
+  }
+
+  roomBlocks = room.blocks.map(b => ({x: b.x, y: b.y}));
+  roomDoors = room.doors.map((d, i) => ({...d, open: false, idx: i}));
+  roomSwitches = (room.switches || []).map(s => ({...s, on: false}));
+  roomPortals = (room.portals || []).map(p => ({...p}));
+  roomCrystals = (room.crystals || []).map((c, i) => {
+    const key = `${idx}_${i}`;
+    return {...c, collected: collectedCrystals.has(key), idx: i};
+  });
+  player.x = room.spawnX * TILE + TILE / 2;
+  player.y = room.spawnY * TILE + TILE / 2;
+  player.vx = 0;
+  player.vy = 0;
+  player.teleportCooldown = 0;
+  particles = [];
+}
+
+function transitionToRoom(idx) {
+  if (idx >= rooms.length) {
+    gameState = 'victory';
+    sfxVictory();
+    victoryTimer = 0;
+    return;
+  }
+  if (rooms[idx].crystalsNeeded > crystalCount) {
+    showNotification(`Need ${rooms[idx].crystalsNeeded} crystals! (You have ${crystalCount})`, 2);
+    return;
+  }
+  nextRoomIndex = idx;
+  roomTransition = 1;
+  roomTransDir = 1;
+}
+
+// --- Collision ---
+function isSolid(tx, ty) {
+  if (tx < 0 || ty < 0 || tx >= COLS || ty >= ROWS) return true;
+  const tile = room.map[ty][tx];
+  if (tile === T.WALL) return true;
+  // Check doors
+  for (const d of roomDoors) {
+    if (d.x === tx && d.y === ty && !d.open) return true;
+  }
+  return false;
+}
+
+function isBlockAt(tx, ty) {
+  return roomBlocks.find(b => b.x === tx && b.y === ty);
+}
+
+function rectOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+// --- Update ---
+function updatePlayer(dt) {
+  let ix = 0, iy = 0;
+  if (keys['w'] || keys['arrowup']) iy -= 1;
+  if (keys['s'] || keys['arrowdown']) iy += 1;
+  if (keys['a'] || keys['arrowleft']) ix -= 1;
+  if (keys['d'] || keys['arrowright']) ix += 1;
+
+  // Normalize diagonal
+  const len = Math.sqrt(ix * ix + iy * iy);
+  if (len > 0) {
+    ix /= len;
+    iy /= len;
+  }
+
+  // Acceleration / deceleration
+  const speed = player.speed * TILE;
+  if (len > 0) {
+    player.vx += (ix * speed - player.vx) * player.accel;
+    player.vy += (iy * speed - player.vy) * player.accel;
+  } else {
+    player.vx *= (1 - player.decel);
+    player.vy *= (1 - player.decel);
+    if (Math.abs(player.vx) < 0.5) player.vx = 0;
+    if (Math.abs(player.vy) < 0.5) player.vy = 0;
+  }
+
+  // Facing
+  if (len > 0) {
+    player.facingX = ix;
+    player.facingY = iy;
+    if (Math.abs(ix) > 0.1) player.flipX = ix < 0;
+  }
+
+  // Step sound
+  if (Math.abs(player.vx) > 10 || Math.abs(player.vy) > 10) {
+    stepTimer -= dt;
+    if (stepTimer <= 0) {
+      sfxStep();
+      stepTimer = 0.25;
+    }
+  }
+
+  // Move X
+  let newX = player.x + player.vx * dt;
+  if (!collidesAt(newX, player.y)) {
+    player.x = newX;
+  } else {
+    // Try to push block
+    tryPushBlock(newX, player.y, Math.sign(player.vx), 0);
+    checkNoEntryBump(newX, player.y);
+    player.vx = 0;
+  }
+
+  // Move Y
+  let newY = player.y + player.vy * dt;
+  if (!collidesAt(player.x, newY)) {
+    player.y = newY;
+  } else {
+    tryPushBlock(player.x, newY, 0, Math.sign(player.vy));
+    checkNoEntryBump(player.x, newY);
+    player.vy = 0;
+  }
+
+  // Jump action (SPACEBAR)
+  if (keys[' '] && !player.isJumping && player.jumpCooldown <= 0) {
+    player.isJumping = true;
+    player.vz = 240;
+    player.jumpCooldown = 0.25;
+    sfxJump();
+    for (let i = 0; i < 6; i++) {
+      particles.push({
+        x: player.x + (Math.random() - 0.5) * 16,
+        y: player.y + player.h / 2,
+        vx: (Math.random() - 0.5) * 40,
+        vy: (Math.random() - 0.5) * 20,
+        life: 0.25, maxLife: 0.25,
+        color: '#CBD5E1', size: 2
+      });
+    }
+  }
+
+  // Jump gravity & landing physics
+  if (player.jumpCooldown > 0) player.jumpCooldown -= dt;
+  if (player.isJumping) {
+    player.vz -= 720 * dt;
+    player.z += player.vz * dt;
+    if (player.z <= 0) {
+      player.z = 0;
+      player.vz = 0;
+      player.isJumping = false;
+      sfxLand();
+      for (let i = 0; i < 8; i++) {
+        particles.push({
+          x: player.x + (Math.random() - 0.5) * 20,
+          y: player.y + player.h / 2,
+          vx: (Math.random() - 0.5) * 50,
+          vy: (Math.random() - 0.5) * 25,
+          life: 0.3, maxLife: 0.3,
+          color: '#94A3B8', size: 2.5
+        });
+      }
+    }
+  }
+
+  // Interact cooldown
+  if (player.interactCooldown > 0) player.interactCooldown -= dt;
+  if (player.teleportCooldown > 0) player.teleportCooldown -= dt;
+  if (bumpWarningCooldown > 0) bumpWarningCooldown -= dt;
+
+  // Automatic switch proximity notification
+  let nearSwitchFound = false;
+  for (const sw of roomSwitches) {
+    const dist = Math.hypot((sw.x + 0.5) * TILE - player.x, (sw.y + 0.5) * TILE - player.y);
+    if (dist < TILE * 1.6) {
+      nearSwitchFound = true;
+      if (switchHintCooldown <= 0) {
+        showNotification(sw.on ? '💡 Near Switch: Press [E] to turn OFF' : '💡 Near Switch: Press [E] to flip switch!', 1.8);
+        switchHintCooldown = 3.5;
+      }
+      break;
+    }
+  }
+  if (!nearSwitchFound && switchHintCooldown > 0) {
+    switchHintCooldown -= dt;
+  }
+
+  // E to interact
+  if (keys['e'] && player.interactCooldown <= 0) {
+    interact();
+    player.interactCooldown = 0.3;
+  }
+
+  // H for hint
+  if (keys['h'] && player.interactCooldown <= 0) {
+    showHint();
+    player.interactCooldown = 0.5;
+    keys['h'] = false;
+  }
+}
+
+function spawnBarrierSparks(x, y, color) {
+  for (let i = 0; i < 14; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 160,
+      vy: (Math.random() - 0.5) * 160,
+      life: 0.35 + Math.random() * 0.25,
+      maxLife: 0.35 + Math.random() * 0.25,
+      color: Math.random() > 0.4 ? color : '#FFFFFF',
+      size: 2 + Math.random() * 3,
+    });
+  }
+}
+
+function checkNoEntryBump(px, py) {
+  if (bumpWarningCooldown > 0) return;
+  const tx = Math.floor(px / TILE);
+  const ty = Math.floor(py / TILE);
+
+  const door = roomDoors.find(d => !d.open && Math.abs(d.x - tx) <= 1 && Math.abs(d.y - ty) <= 1);
+  if (door) {
+    showNotification('⛔ ANCIENT GATE SEALED: SOLVE PUZZLE TO OPEN!', 1.6);
+    sfxBarrier();
+    spawnBarrierSparks(door.x * TILE + TILE/2, door.y * TILE + TILE/2, '#EF4444');
+    bumpWarningCooldown = 1.3;
+  }
+}
+
+function collidesAt(px, py) {
+  const hw = player.w / 2, hh = player.h / 2;
+  const left = Math.floor((px - hw) / TILE);
+  const right = Math.floor((px + hw - 1) / TILE);
+  const top = Math.floor((py - hh) / TILE);
+  const bot = Math.floor((py + hh - 1) / TILE);
+
+  for (let ty = top; ty <= bot; ty++) {
+    for (let tx = left; tx <= right; tx++) {
+      if (isSolid(tx, ty)) return true;
+      if (isBlockAt(tx, ty)) return true;
+    }
+  }
+  return false;
+}
+
+function tryPushBlock(px, py, dx, dy) {
+  if (dx === 0 && dy === 0) return;
+  const hw = player.w / 2, hh = player.h / 2;
+
+  // Primary tile the player is pushing into
+  const checkX = dx !== 0 ? Math.floor((px + (dx > 0 ? hw : -hw)) / TILE) : Math.floor(player.x / TILE);
+  const checkY = dy !== 0 ? Math.floor((py + (dy > 0 ? hh : -hh)) / TILE) : Math.floor(player.y / TILE);
+
+  // Also check adjacent tile for forgiving push (player slightly misaligned)
+  let block = isBlockAt(checkX, checkY);
+  if (!block && dx !== 0) {
+    // try one tile above/below player center
+    const altY = Math.floor((player.y + (player.h * 0.3)) / TILE);
+    const altY2 = Math.floor((player.y - (player.h * 0.3)) / TILE);
+    block = isBlockAt(checkX, altY) || isBlockAt(checkX, altY2);
+  }
+  if (!block && dy !== 0) {
+    const altX = Math.floor((player.x + (player.w * 0.3)) / TILE);
+    const altX2 = Math.floor((player.x - (player.w * 0.3)) / TILE);
+    block = isBlockAt(altX, checkY) || isBlockAt(altX2, checkY);
+  }
+
+  if (block) {
+    const destX = block.x + dx;
+    const destY = block.y + dy;
+    if (!isSolid(destX, destY) && !isBlockAt(destX, destY)) {
+      block.x = destX;
+      block.y = destY;
+      sfxPush();
+      spawnParticles(destX * TILE + TILE/2, destY * TILE + TILE/2, '#8B7355', 4);
+    }
+  }
+}
+
+function interact() {
+  const ptx = Math.floor(player.x / TILE);
+  const pty = Math.floor(player.y / TILE);
+
+  // Check switches nearby
+  for (const sw of roomSwitches) {
+    if (Math.abs(sw.x - ptx) <= 1 && Math.abs(sw.y - pty) <= 1) {
+      sw.on = !sw.on;
+      sfxSwitch();
+      spawnParticles(sw.x * TILE + TILE/2, sw.y * TILE + TILE/2, '#FFD700', 6);
+      showNotification(sw.on ? 'Switch activated!' : 'Switch deactivated!');
+    }
+  }
+}
+
+function showHint() {
+  const hints = [
+    // Room 1
+    'Push a stone block onto the glowing orange plate to open the door!',
+    // Room 2
+    'Each door has its own plate. Push blocks onto both plates!',
+    // Room 3
+    'Press E near switches to toggle doors. Watch for the automatic switch prompt!',
+    // Room 4
+    'Step into portals to teleport. Find the switch on the other side!',
+    // Room 5
+    'The Mirror Chambers: Navigate through portals and flip both switches to open the path forward!',
+    // Room 6
+    'The Sunken Vault: Push blocks across the bridge onto pressure plates to open the gates!',
+    // Room 7
+    'Heart of the Temple: Flip both ancient switches to unseal the central sacred altar!',
+  ];
+  showNotification(hints[currentRoomIndex] || 'Explore the room!', 4);
+}
+
+function updateDoors() {
+  for (const d of roomDoors) {
+    let shouldOpen = false;
+    if (d.type === 'plate') {
+      // Check if any block is on the plate
+      shouldOpen = roomBlocks.some(b => b.x === d.plateX && b.y === d.plateY);
+    } else if (d.type === 'switch') {
+      // Find switch that controls this door
+      const sw = roomSwitches.find(s => s.doorIdx === d.idx);
+      if (sw) shouldOpen = sw.on;
+    } else if (d.type === 'crystal') {
+      shouldOpen = crystalCount >= (d.crystalsNeeded || 0);
+    }
+    if (shouldOpen && !d.open) {
+      d.open = true;
+      sfxDoor();
+      spawnParticles(d.x * TILE + TILE/2, d.y * TILE + TILE/2, '#06B6D4', 8);
+    } else if (!shouldOpen && d.open) {
+      // Check player isn't in the door
+      const ptx = Math.floor(player.x / TILE);
+      const pty = Math.floor(player.y / TILE);
+      if (ptx !== d.x || pty !== d.y) {
+        d.open = false;
+      }
+    }
+  }
+}
+
+function updateCrystals() {
+  const ptx = Math.floor(player.x / TILE);
+  const pty = Math.floor(player.y / TILE);
+
+  for (const c of roomCrystals) {
+    if (!c.collected && c.x === ptx && c.y === pty) {
+      c.collected = true;
+      collectedCrystals.add(`${currentRoomIndex}_${c.idx}`);
+      crystalCount++;
+      sfxCrystal();
+      spawnParticles(c.x * TILE + TILE/2, c.y * TILE + TILE/2, '#A78BFA', 12);
+      showNotification(`Crystal collected! (${crystalCount}/${totalCrystals})`);
+    }
+  }
+}
+
+function updatePortals() {
+  if (player.teleportCooldown > 0) return;
+  const ptx = Math.floor(player.x / TILE);
+  const pty = Math.floor(player.y / TILE);
+
+  for (const p of roomPortals) {
+    if (ptx === p.ax && pty === p.ay) {
+      player.x = p.bx * TILE + TILE / 2;
+      player.y = p.by * TILE + TILE / 2;
+      player.teleportCooldown = 0.5;
+      sfxTeleport();
+      spawnParticles(p.bx * TILE + TILE/2, p.by * TILE + TILE/2, '#06B6D4', 10);
+      showNotification('Teleported!');
+      return;
+    }
+    if (ptx === p.bx && pty === p.by) {
+      player.x = p.ax * TILE + TILE / 2;
+      player.y = p.ay * TILE + TILE / 2;
+      player.teleportCooldown = 0.5;
+      sfxTeleport();
+      spawnParticles(p.ax * TILE + TILE/2, p.ay * TILE + TILE/2, '#06B6D4', 10);
+      showNotification('Teleported!');
+      return;
+    }
+  }
+}
+
+function updateExit() {
+  const ptx = Math.floor(player.x / TILE);
+  const pty = Math.floor(player.y / TILE);
+  if (room.exit && ptx === room.exit.x && pty === room.exit.y) {
+    // Check if all doors are open (meaning puzzles solved)
+    const allDoorsOpen = roomDoors.every(d => d.open);
+    if (allDoorsOpen || roomDoors.length === 0) {
+      transitionToRoom(currentRoomIndex + 1);
+    } else {
+      showNotification('Solve the puzzle to proceed!');
+    }
+  }
+}
+
+// --- Particles ---
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 120,
+      vy: (Math.random() - 0.5) * 120,
+      life: 0.5 + Math.random() * 0.5,
+      maxLife: 0.5 + Math.random() * 0.5,
+      color,
+      size: 2 + Math.random() * 4,
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  // Update ambient floating dust motes
+  for (const m of ambientMotes) {
+    m.y += m.vy * dt;
+    m.x += m.vx * dt;
+    if (m.y < -10) m.y = canvas.height + 10;
+    if (m.x < -10) m.x = canvas.width + 10;
+    if (m.x > canvas.width + 10) m.x = -10;
+  }
+}
+
+// --- Notification ---
+function updateNotification(dt) {
+  if (notificationTimer > 0) {
+    notificationTimer -= dt;
+    if (notificationTimer <= 0) notification = null;
+  }
+}
+
+// --- Room Transition ---
+function updateTransition(dt) {
+  if (roomTransDir === 1) {
+    roomTransition += dt * 3;
+    if (roomTransition >= 1) {
+      roomTransition = 1;
+      roomTransDir = -1;
+      if (nextRoomIndex >= 0 && nextRoomIndex < rooms.length) {
+        loadRoom(nextRoomIndex);
+      }
+    }
+  } else if (roomTransDir === -1) {
+    roomTransition -= dt * 3;
+    if (roomTransition <= 0) {
+      roomTransition = 0;
+      roomTransDir = 0;
+    }
+  }
+}
+
+// --- Drawing ---
+function drawTile(x, y, color) {
+  ctx.fillStyle = color;
+  ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+}
+
+function drawTileImage(x, y, img) {
+  ctx.drawImage(img, x * TILE, y * TILE, TILE, TILE);
+}
+
+function drawRoom() {
+  // Floor & walls
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const tile = room.map[y][x];
+      if (tile === T.WALL) {
+        if (ASSETS.tile_stone_wall && ASSETS.tile_stone_wall.complete) {
+          drawTileImage(x, y, ASSETS.tile_stone_wall);
+        } else {
+          drawTile(x, y, '#1B2635');
+        }
+      } else {
+        if (ASSETS.tile_stone_floor && ASSETS.tile_stone_floor.complete) {
+          drawTileImage(x, y, ASSETS.tile_stone_floor);
+        } else {
+          drawTile(x, y, '#334155');
+        }
+      }
+    }
+  }
+
+  // Pressure plates with visual hints
+  for (const d of roomDoors) {
+    if (d.type === 'plate') {
+      const pressed = roomBlocks.some(b => b.x === d.plateX && b.y === d.plateY);
+      const pulse = Math.sin(Date.now() * 0.005) * 0.3 + 0.7;
+
+      // Dashed line connecting plate to door (hint)
+      if (!pressed && !d.open) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(217, 119, 6, 0.28)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 6]);
+        ctx.beginPath();
+        ctx.moveTo(d.plateX * TILE + TILE/2, d.plateY * TILE + TILE/2);
+        ctx.lineTo(d.x * TILE + TILE/2, d.y * TILE + TILE/2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Plate glow when not pressed
+      if (!pressed) {
+        ctx.save();
+        ctx.globalAlpha = pulse * 0.25;
+        const grd = ctx.createRadialGradient(
+          d.plateX * TILE + TILE/2, d.plateY * TILE + TILE/2, 0,
+          d.plateX * TILE + TILE/2, d.plateY * TILE + TILE/2, TILE * 0.65
+        );
+        grd.addColorStop(0, '#F59E0B');
+        grd.addColorStop(1, 'transparent');
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.arc(d.plateX * TILE + TILE/2, d.plateY * TILE + TILE/2, TILE * 0.65, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Chiseled Stone Plate Socket
+      ctx.fillStyle = pressed ? '#064E3B' : '#1C1917';
+      ctx.fillRect(d.plateX * TILE + 6, d.plateY * TILE + 6, TILE - 12, TILE - 12);
+      ctx.fillStyle = pressed ? '#10B981' : '#D97706';
+      ctx.fillRect(d.plateX * TILE + 9, d.plateY * TILE + 9, TILE - 18, TILE - 18);
+      ctx.strokeStyle = pressed ? '#34D399' : '#F59E0B';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(d.plateX * TILE + 9, d.plateY * TILE + 9, TILE - 18, TILE - 18);
+
+      // "▼" arrow hint above plate when not pressed
+      if (!pressed) {
+        ctx.fillStyle = `rgba(245, 158, 11, ${pulse})`;
+        ctx.font = 'bold 13px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('▼', d.plateX * TILE + TILE/2, d.plateY * TILE - 2);
+      }
+    }
+  }
+
+  // Switches
+  for (const sw of roomSwitches) {
+    ctx.fillStyle = sw.on ? '#FFD700' : '#4B5563';
+    const sx = sw.x * TILE + TILE/2, sy = sw.y * TILE + TILE/2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, TILE * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = sw.on ? '#F59E0B' : '#374151';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    // Lever
+    ctx.strokeStyle = '#FFF';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + (sw.on ? 8 : -8), sy - 12);
+    ctx.stroke();
+
+    // Automatic floating hint when near switch
+    const distToPlayer = Math.hypot(sx - player.x, sy - player.y);
+    if (distToPlayer < TILE * 1.8) {
+      const bob = Math.sin(Date.now() * 0.008) * 3;
+      const hy = sy - 24 + bob;
+
+      ctx.save();
+      ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      const promptText = sw.on ? '⚡ [E] TURN OFF' : '⚡ [E] FLIP SWITCH';
+      const pw = ctx.measureText(promptText).width + 16;
+
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.94)';
+      ctx.strokeStyle = sw.on ? '#F59E0B' : '#06B6D4';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(sx - pw/2, hy - 10, pw, 20, 10);
+      else ctx.rect(sx - pw/2, hy - 10, pw, 20);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#F8FAFC';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(promptText, sx, hy);
+
+      // Pointer arrow
+      ctx.fillStyle = sw.on ? '#F59E0B' : '#06B6D4';
+      ctx.beginPath();
+      ctx.moveTo(sx - 4, hy + 10);
+      ctx.lineTo(sx + 4, hy + 10);
+      ctx.lineTo(sx, hy + 14);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // Portals
+  const portalPulse = Math.sin(Date.now() * 0.005) * 0.3 + 0.7;
+  for (const p of roomPortals) {
+    drawPortal(p.ax, p.ay, portalPulse, '#06B6D4');
+    drawPortal(p.bx, p.by, portalPulse, '#06B6D4');
+  }
+
+  // Crystals
+  const crystalBob = Math.sin(Date.now() * 0.004) * 3;
+  for (const c of roomCrystals) {
+    if (!c.collected) {
+      drawCrystal(c.x * TILE + TILE/2, c.y * TILE + TILE/2 + crystalBob);
+    }
+  }
+
+  // Doors (Heavy Ancient Portcullis Gates)
+  for (const d of roomDoors) {
+    if (!d.open) {
+      const dx = d.x * TILE;
+      const dy = d.y * TILE;
+
+      // Gate background shadow
+      ctx.fillStyle = '#0F172A';
+      ctx.fillRect(dx + 2, dy + 2, TILE - 4, TILE - 4);
+
+      // Heavy bronze vertical bars
+      for (let i = 0; i < 4; i++) {
+        const bx = dx + 6 + i * 10;
+        ctx.fillStyle = '#78350F';
+        ctx.fillRect(bx, dy + 3, 5, TILE - 6);
+        ctx.fillStyle = '#B45309';
+        ctx.fillRect(bx + 1, dy + 3, 2, TILE - 6); // highlight
+      }
+
+      // Horizontal crossbeams
+      ctx.fillStyle = '#451A03';
+      ctx.fillRect(dx + 2, dy + 10, TILE - 4, 5);
+      ctx.fillRect(dx + 2, dy + TILE - 15, TILE - 4, 5);
+
+      // Posh NO ENTRY / LOCKED ward badge
+      ctx.save();
+      const signX = dx + TILE / 2;
+      const signY = dy + TILE / 2;
+      const sW = TILE - 6;
+      const sH = 15;
+
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+      ctx.strokeStyle = '#DC2626';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(signX - sW/2, signY - sH/2, sW, sH, 3);
+      else ctx.rect(signX - sW/2, signY - sH/2, sW, sH);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#EF4444';
+      ctx.font = 'bold 7px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⛔ LOCKED', signX, signY);
+      ctx.restore();
+    }
+  }
+
+  // Exit
+  if (room.exit) {
+    const ex = room.exit.x, ey = room.exit.y;
+    const allOpen = roomDoors.every(d => d.open);
+    ctx.fillStyle = allOpen ? `rgba(34, 197, 94, ${0.4 + portalPulse * 0.3})` : 'rgba(107, 114, 128, 0.3)';
+    ctx.fillRect(ex * TILE, ey * TILE, TILE, TILE);
+    if (allOpen) {
+      ctx.strokeStyle = '#22C55E';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(ex * TILE + 4, ey * TILE + 4, TILE - 8, TILE - 8);
+      // Arrow
+      ctx.fillStyle = '#22C55E';
+      ctx.beginPath();
+      ctx.moveTo(ex * TILE + TILE * 0.7, ey * TILE + TILE/2);
+      ctx.lineTo(ex * TILE + TILE * 0.4, ey * TILE + TILE * 0.3);
+      ctx.lineTo(ex * TILE + TILE * 0.4, ey * TILE + TILE * 0.7);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Blocks (Posh Carved Temple Stones)
+  for (const b of roomBlocks) {
+    const bx = b.x * TILE;
+    const by = b.y * TILE;
+
+    // Drop shadow
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.fillRect(bx + 5, by + 5, TILE - 6, TILE - 6);
+
+    // Stone body
+    ctx.fillStyle = '#57534E';
+    ctx.fillRect(bx + 3, by + 3, TILE - 6, TILE - 6);
+
+    // Beveled edge
+    ctx.strokeStyle = '#78716C';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx + 3, by + 3, TILE - 6, TILE - 6);
+
+    // Carved golden diamond glyph
+    ctx.strokeStyle = '#D97706';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(bx + TILE/2, by + 10);
+    ctx.lineTo(bx + TILE - 10, by + TILE/2);
+    ctx.lineTo(bx + TILE/2, by + TILE - 10);
+    ctx.lineTo(bx + 10, by + TILE/2);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.fillStyle = '#B45309';
+    ctx.fillRect(bx + TILE/2 - 2, by + TILE/2 - 2, 4, 4);
+  }
+
+  // Player
+  drawPlayer();
+
+  // Particles
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawTempleAtmosphere() {
+  ctx.save();
+  const lightRadius = 280;
+  const flicker = Math.sin(Date.now() * 0.007) * 4;
+  const lx = player.x;
+  const ly = player.y;
+
+  // Soft atmospheric ambient darkness with luminous warm player torch aura
+  const ambientLight = ctx.createRadialGradient(lx, ly, 25, lx, ly, lightRadius + flicker);
+  ambientLight.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  ambientLight.addColorStop(0.65, 'rgba(5, 8, 18, 0.16)');
+  ambientLight.addColorStop(1, 'rgba(3, 5, 12, 0.68)');
+
+  ctx.fillStyle = ambientLight;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Floating Golden Temple Dust Motes
+  for (const m of ambientMotes) {
+    ctx.fillStyle = m.color;
+    ctx.globalAlpha = m.alpha * (Math.sin(Date.now() * 0.003 + m.x) * 0.3 + 0.7);
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, m.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPortal(tx, ty, pulse, color) {
+  const cx = tx * TILE + TILE/2, cy = ty * TILE + TILE/2;
+  ctx.save();
+  ctx.globalAlpha = 0.3 + pulse * 0.3;
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, TILE * 0.45);
+  grad.addColorStop(0, color);
+  grad.addColorStop(1, 'transparent');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, TILE * 0.45, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 0.8;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, TILE * 0.35 * pulse, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, TILE * 0.2 * (1.3 - pulse), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawCrystal(cx, cy) {
+  const glow = Math.sin(Date.now() * 0.006) * 0.2 + 0.3;
+  ctx.save();
+  ctx.globalAlpha = glow;
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, TILE * 0.5);
+  grad.addColorStop(0, '#A78BFA');
+  grad.addColorStop(1, 'transparent');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, TILE * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  // Diamond shape
+  ctx.fillStyle = '#A78BFA';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 14);
+  ctx.lineTo(cx + 9, cy);
+  ctx.lineTo(cx, cy + 14);
+  ctx.lineTo(cx - 9, cy);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#C4B5FD';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // Sparkle
+  ctx.fillStyle = '#FFF';
+  ctx.globalAlpha = 0.8 + Math.sin(Date.now() * 0.01) * 0.2;
+  ctx.fillRect(cx - 1, cy - 6, 2, 4);
+  ctx.restore();
+}
+
+function drawPlayer() {
+  const px = player.x - player.w / 2;
+  const py = player.y - player.h / 2;
+
+  // Soft player cast shadow on stone floor
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+  ctx.beginPath();
+  ctx.ellipse(player.x, player.y + player.h / 2 - 2, player.w * 0.46, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  if (ASSETS.arin_idle && ASSETS.arin_idle.complete) {
+    ctx.save();
+    if (player.flipX) {
+      ctx.translate(player.x, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(ASSETS.arin_idle, -player.w / 2, py, player.w, player.h);
+    } else {
+      ctx.drawImage(ASSETS.arin_idle, px, py, player.w, player.h);
+    }
+    ctx.restore();
+  } else {
+    ctx.fillStyle = '#06B6D4';
+    ctx.fillRect(px, py, player.w, player.h);
+    ctx.fillStyle = '#FFF';
+    const eyeOff = player.flipX ? -4 : 4;
+    ctx.fillRect(player.x + eyeOff - 3, player.y - 5, 3, 3);
+    ctx.fillRect(player.x + eyeOff + 2, player.y - 5, 3, 3);
+  }
+}
+
+// --- HUD ---
+function drawHUD() {
+  ctx.save();
+
+  // 1. Top Obsidian & Gold Frosted Banner
+  ctx.fillStyle = 'rgba(8, 12, 20, 0.9)';
+  ctx.fillRect(0, 0, canvas.width, 42);
+
+  // Bottom gold filigree line
+  ctx.strokeStyle = '#D97706';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, 42);
+  ctx.lineTo(canvas.width, 42);
+  ctx.stroke();
+
+  // Left: Room Title in Elegant Serif with Golden Diamond Glyphs
+  ctx.fillStyle = '#F59E0B';
+  ctx.font = 'bold 12px "Cinzel", serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('◈', 14, 26);
+
+  ctx.fillStyle = '#F8FAFC';
+  ctx.font = 'bold 14px "Cinzel", Georgia, serif';
+  ctx.fillText(room.name, 30, 26);
+
+  // Center: Roman / Chapter Indicator in Sleek Pill
+  const chapterPillW = 132;
+  const cpx = canvas.width / 2 - chapterPillW / 2;
+  ctx.fillStyle = 'rgba(245, 158, 11, 0.12)';
+  ctx.strokeStyle = '#B45309';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(cpx, 8, chapterPillW, 26, 13);
+  else ctx.rect(cpx, 8, chapterPillW, 26);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#FDE68A';
+  ctx.font = 'bold 11px "Cinzel", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`CHAMBER ${currentRoomIndex + 1} OF ${rooms.length}`, canvas.width / 2, 25);
+
+  // Right: Shimmering Crystal Counter
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#C084FC';
+  ctx.font = 'bold 14px "Cinzel", Georgia, serif';
+  ctx.fillText(`💎 ${crystalCount} / ${totalCrystals}`, canvas.width - 16, 26);
+
+  // 2. Bottom Controls Bar (Posh Glassmorphism Pill)
+  const barText = 'WASD: MOVE  •  E: INTERACT  •  H: HINT  •  P: PAUSE  •  M: SOUND';
+  ctx.font = 'bold 10px "Plus Jakarta Sans", sans-serif';
+  const btw = ctx.measureText(barText).width + 36;
+  const bx = canvas.width / 2 - btw / 2;
+  const by = canvas.height - 28;
+
+  ctx.fillStyle = 'rgba(8, 12, 20, 0.9)';
+  ctx.strokeStyle = '#78350F';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(bx, by, btw, 22, 11);
+  else ctx.rect(bx, by, btw, 22);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#94A3B8';
+  ctx.textAlign = 'center';
+  ctx.fillText(barText, canvas.width / 2, by + 15);
+
+  // Mute indicator on far right of bottom
+  if (muted) {
+    ctx.fillStyle = '#EF4444';
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 10px "Plus Jakarta Sans", sans-serif';
+    ctx.fillText('🔇 MUTED', canvas.width - 14, canvas.height - 12);
+  }
+
+  // 3. Notification Card with Ancient Runic Brackets
+  if (notification) {
+    const alpha = Math.min(1, notificationTimer * 2.5);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    ctx.font = 'bold 13px "Plus Jakarta Sans", sans-serif';
+    const nw = ctx.measureText(notification).width + 50;
+    const nx = canvas.width / 2 - nw / 2;
+    const ny = canvas.height / 2 - 58;
+
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+    ctx.strokeStyle = '#D97706';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(nx, ny, nw, 38, 8);
+    else ctx.rect(nx, ny, nw, 38);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#F59E0B';
+    ctx.font = 'bold 12px "Cinzel", serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('✦', nx + 12, ny + 24);
+    ctx.textAlign = 'right';
+    ctx.fillText('✦', nx + nw - 12, ny + 24);
+
+    ctx.fillStyle = '#F8FAFC';
+    ctx.font = 'bold 13px "Plus Jakarta Sans", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(notification, canvas.width / 2, ny + 24);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+// --- Menu Screen ---
+function drawMenu() {
+  ctx.fillStyle = '#070a12';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Animated background tiles
+  const t = Date.now() * 0.001;
+  ctx.globalAlpha = 0.05;
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const d = Math.sin(x * 0.5 + t) * Math.cos(y * 0.5 + t * 0.7);
+      ctx.fillStyle = d > 0 ? '#06B6D4' : '#F59E0B';
+      ctx.fillRect(x * TILE + 4, y * TILE + 4, TILE - 8, TILE - 8);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Floating ambient motes in menu
+  for (const m of ambientMotes) {
+    ctx.fillStyle = m.color;
+    ctx.globalAlpha = m.alpha * 0.7;
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, m.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Title: Posh Golden Serif
+  ctx.fillStyle = '#FBBF24';
+  ctx.font = 'bold 14px "Cinzel", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('✦  A N C I E N T   S A N C T U A R Y   E X P E D I T I O N  ✦', canvas.width / 2, canvas.height / 2 - 95);
+
+  const titleGrad = ctx.createLinearGradient(0, canvas.height / 2 - 80, 0, canvas.height / 2 - 20);
+  titleGrad.addColorStop(0, '#FFFBEB');
+  titleGrad.addColorStop(0.5, '#FDE68A');
+  titleGrad.addColorStop(1, '#D97706');
+  ctx.fillStyle = titleGrad;
+  ctx.font = '900 44px "Cinzel", Georgia, serif';
+  ctx.fillText('ECHOES OF THE', canvas.width / 2, canvas.height / 2 - 50);
+  ctx.fillText('LOST TEMPLE', canvas.width / 2, canvas.height / 2 - 2);
+
+  ctx.fillStyle = '#94A3B8';
+  ctx.font = '600 13px "Plus Jakarta Sans", sans-serif';
+  ctx.fillText('7 ANCIENT PUZZLE CHAMBERS  •  SACRED RELICS  •  ARCANE PORTALS', canvas.width / 2, canvas.height / 2 + 35);
+
+  // Start Button Container
+  const btnW = 260;
+  const btnH = 46;
+  const bx = canvas.width / 2 - btnW / 2;
+  const by = canvas.height / 2 + 70;
+  const pulse = Math.sin(Date.now() * 0.005) * 0.2 + 0.8;
+
+  ctx.save();
+  ctx.shadowColor = '#D97706';
+  ctx.shadowBlur = pulse * 14;
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+  ctx.strokeStyle = `rgba(217, 119, 6, ${pulse})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(bx, by, btnW, btnH, 8);
+  else ctx.rect(bx, by, btnW, btnH);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.fillStyle = '#FFFBEB';
+  ctx.font = 'bold 15px "Cinzel", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('ENTER THE TEMPLE', canvas.width / 2, by + 28);
+
+  ctx.fillStyle = '#64748B';
+  ctx.font = 'bold 11px "Plus Jakarta Sans", sans-serif';
+  ctx.fillText('PRESS [ENTER] TO START  •  PRESS [I] FOR CODEX', canvas.width / 2, by + 72);
+
+  // Crystal relics on left and right
+  drawCrystal(canvas.width / 2 - 210, canvas.height / 2 - 25);
+  drawCrystal(canvas.width / 2 + 210, canvas.height / 2 - 25);
+}
+
+function drawInstructions() {
+  ctx.fillStyle = '#070a12';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = '#F59E0B';
+  ctx.font = 'bold 13px "Cinzel", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('✦  ARCHAEOLOGIST\'S COMPENDIUM  ✦', canvas.width / 2, 40);
+
+  ctx.fillStyle = '#F8FAFC';
+  ctx.font = 'bold 24px "Cinzel", Georgia, serif';
+  ctx.fillText('CODEX OF THE LOST TEMPLE', canvas.width / 2, 70);
+
+  const lines = [
+    ['🎮 WASD / Arrow Keys', 'Traverse the ancient stone chambers'],
+    ['⚡ Switch Proximity', 'Automatic hint badge pops up when near (Press [E] to flip)'],
+    ['📦 Pushable Monoliths', 'Slide ancient stone blocks onto pressure plates'],
+    ['💎 Sacred Crystals', 'Gather radiant crystals to break barrier thresholds'],
+    ['🌀 Void Portals', 'Traverse astral rifts to bypass sealed corridors'],
+    ['🚪 Temple Portcullis', 'Solve chamber puzzles to raise locked gates'],
+    ['💡 H Key / Wisdom', 'Request context-sensitive guidance for current room'],
+    ['⏸ P Key / M Key', 'Pause expedition / Toggle acoustic atmosphere'],
+  ];
+
+  ctx.font = '13px "Plus Jakarta Sans", sans-serif';
+  lines.forEach(([key, desc], i) => {
+    const y = 110 + i * 40;
+    ctx.fillStyle = '#FBBF24';
+    ctx.textAlign = 'right';
+    ctx.fillText(key, canvas.width / 2 - 24, y);
+    ctx.fillStyle = '#CBD5E1';
+    ctx.textAlign = 'left';
+    ctx.fillText(desc, canvas.width / 2 + 24, y);
+  });
+
+  const blink = Math.sin(Date.now() * 0.004) > 0;
+  if (blink) {
+    ctx.fillStyle = '#64748B';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 12px "Plus Jakarta Sans", sans-serif';
+    ctx.fillText('PRESS [ENTER] OR [ESC] TO RETURN TO THE EXPEDITION', canvas.width / 2, canvas.height - 35);
+  }
+}
+
+function drawPause() {
+  ctx.fillStyle = 'rgba(4, 7, 14, 0.85)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const pw = 360;
+  const ph = 200;
+  const px = canvas.width / 2 - pw / 2;
+  const py = canvas.height / 2 - ph / 2;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+  ctx.strokeStyle = '#D97706';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(px, py, pw, ph, 10);
+  else ctx.rect(px, py, pw, ph);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#F59E0B';
+  ctx.font = 'bold 12px "Cinzel", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('✦ EXPEDITION PAUSED ✦', canvas.width / 2, py + 38);
+
+  ctx.fillStyle = '#F8FAFC';
+  ctx.font = 'bold 18px "Cinzel", Georgia, serif';
+  ctx.fillText(`CHAMBER ${currentRoomIndex + 1}: ${room.name}`, canvas.width / 2, py + 72);
+
+  ctx.fillStyle = '#C084FC';
+  ctx.font = 'bold 13px "Plus Jakarta Sans", sans-serif';
+  ctx.fillText(`Relics Gathered: ${crystalCount} / ${totalCrystals}`, canvas.width / 2, py + 105);
+
+  ctx.fillStyle = '#94A3B8';
+  ctx.font = 'bold 12px "Plus Jakarta Sans", sans-serif';
+  ctx.fillText('[P / ESC] RESUME  •  [R] RESTART CHAMBER', canvas.width / 2, py + 148);
+  ctx.restore();
+}
+
+function drawVictory() {
+  victoryTimer += 0.016;
+  ctx.fillStyle = '#050811';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Grand celebratory particle cascades
+  if (Math.random() < 0.45) {
+    spawnParticles(
+      Math.random() * canvas.width,
+      Math.random() * canvas.height,
+      ['#F59E0B', '#FBBF24', '#C084FC', '#38BDF8', '#10B981'][Math.floor(Math.random() * 5)],
+      3
+    );
+  }
+
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#F59E0B';
+  ctx.font = 'bold 14px "Cinzel", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('✦  THE SACRED PROPHECY FULFILLED  ✦', canvas.width / 2, canvas.height / 2 - 80);
+
+  const titleGrad = ctx.createLinearGradient(0, canvas.height / 2 - 70, 0, canvas.height / 2 - 10);
+  titleGrad.addColorStop(0, '#FFFBEB');
+  titleGrad.addColorStop(0.5, '#FDE68A');
+  titleGrad.addColorStop(1, '#D97706');
+  ctx.fillStyle = titleGrad;
+  ctx.font = '900 36px "Cinzel", Georgia, serif';
+  ctx.fillText('THE TEMPLE\'S SECRET', canvas.width / 2, canvas.height / 2 - 40);
+  ctx.fillText('HAS BEEN RESTORED', canvas.width / 2, canvas.height / 2 + 4);
+
+  ctx.fillStyle = '#C084FC';
+  ctx.font = 'bold 16px "Plus Jakarta Sans", sans-serif';
+  ctx.fillText(`💎 Sacred Relics Collected: ${crystalCount} / ${totalCrystals}`, canvas.width / 2, canvas.height / 2 + 52);
+
+  ctx.fillStyle = '#94A3B8';
+  ctx.font = '600 13px "Plus Jakarta Sans", sans-serif';
+  ctx.fillText('ALL 7 ANCIENT CHAMBERS CONQUERED', canvas.width / 2, canvas.height / 2 + 82);
+
+  const blink = Math.sin(Date.now() * 0.005) > 0;
+  if (blink) {
+    ctx.fillStyle = '#FDE68A';
+    ctx.font = 'bold 14px "Cinzel", serif';
+    ctx.fillText('PRESS [ENTER] TO EMBARK ON A NEW EXPEDITION', canvas.width / 2, canvas.height / 2 + 130);
+  }
+}
+
+// --- Main Loop ---
+let lastTime = 0;
+let pauseDebounce = 0;
+
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+
+  // Global key handling
+  pauseDebounce -= dt;
+
+  if (keys['m'] && pauseDebounce <= 0) {
+    muted = !muted;
+    pauseDebounce = 0.3;
+  }
+
+  switch (gameState) {
+    case 'menu':
+      drawMenu();
+      if (keys['enter']) { startGame(); keys['enter'] = false; }
+      if (keys['i']) { gameState = 'instructions'; keys['i'] = false; }
+      break;
+
+    case 'instructions':
+      drawInstructions();
+      if (keys['enter'] || keys['escape']) {
+        gameState = 'menu';
+        keys['enter'] = false;
+        keys['escape'] = false;
+      }
+      break;
+
+    case 'playing':
+      if ((keys['p'] || keys['escape']) && pauseDebounce <= 0) {
+        gameState = 'paused';
+        pauseDebounce = 0.3;
+        keys['p'] = false;
+        keys['escape'] = false;
+      }
+
+      if (roomTransDir !== 0) {
+        updateTransition(dt);
+        drawRoom();
+        drawTempleAtmosphere();
+        drawHUD();
+        ctx.fillStyle = `rgba(0, 0, 0, ${roomTransition})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } else {
+        updatePlayer(dt);
+        updateDoors();
+        updateCrystals();
+        updatePortals();
+        updateExit();
+        updateParticles(dt);
+        updateNotification(dt);
+        drawRoom();
+        drawTempleAtmosphere();
+        drawHUD();
+      }
+      break;
+
+    case 'paused':
+      drawRoom();
+      drawTempleAtmosphere();
+      drawHUD();
+      drawPause();
+      if ((keys['p'] || keys['escape']) && pauseDebounce <= 0) {
+        gameState = 'playing';
+        pauseDebounce = 0.3;
+        keys['p'] = false;
+        keys['escape'] = false;
+      }
+      if (keys['r']) {
+        loadRoom(currentRoomIndex);
+        gameState = 'playing';
+        keys['r'] = false;
+      }
+      break;
+
+    case 'victory':
+      updateParticles(dt);
+      drawVictory();
+      if (keys['enter']) {
+        keys['enter'] = false;
+        resetGame();
+      }
+      break;
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+function startGame() {
+  rooms = createRooms();  // always rebuild fresh maps (loadRoom mutates them)
+  totalCrystals = rooms.reduce((sum, r) => sum + (r.crystals ? r.crystals.length : 0), 0);
+  crystalCount = 0;
+  collectedCrystals.clear();
+  currentRoomIndex = 0;
+  loadRoom(0);
+  gameState = 'playing';
+  showNotification('The Forgotten Entrance...', 2);
+}
+
+function resetGame() {
+  crystalCount = 0;
+  collectedCrystals.clear();
+  particles = [];
+  gameState = 'menu';
+}
+
+// --- Boot ---
+loadAssets(() => {
+  requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>
